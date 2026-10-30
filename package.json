@@ -1,0 +1,12 @@
+{
+  "name": "club-tonusco",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Programa web de lealtad para Hostería Tonusco Campestre",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
