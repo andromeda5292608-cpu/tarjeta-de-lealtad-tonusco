@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: tarjeta-de-lealtad-donusco
+    runtime: docker
+    plan: 0.5c-512mb
+    branch: main
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    autoDeployTrigger: commit
+    healthCheckPath: /api/health
+    envVars:
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: DATA_FILE
+        value: /data/tonusco.json
+    disk:
+      name: tonusco-data
+      mountPath: /data
+      sizeGB: 1
