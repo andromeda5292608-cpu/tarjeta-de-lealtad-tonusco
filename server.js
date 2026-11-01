@@ -145,7 +145,12 @@ function recordStamps(guest, { source, count = 1, discountUsed = false, purchase
   return { events };
 }
 function publicGuest(guest) {
-  return { name: guest.name, cardNo: guest.cardNo, visits: guest.visits, stampProgress: guest.stampProgress, reward: reward(guest.stampProgress) };
+  const history = (guest.history || []).filter((event) => event.type === 'stamp').map((event) => ({
+    date: event.date,
+    visitNumber: event.visitNumber || null,
+    discountGranted: Number(event.discountGranted ?? event.nextReward ?? 0),
+  })).reverse();
+  return { name: guest.name, cardNo: guest.cardNo, visits: guest.visits, stampProgress: guest.stampProgress, reward: reward(guest.stampProgress), history };
 }
 function escapeCsv(value) { return `"${String(value ?? '').replace(/"/g, '""')}"`; }
 function localDateKey(value) {
