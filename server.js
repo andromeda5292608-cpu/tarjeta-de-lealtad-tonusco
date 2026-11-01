@@ -13,7 +13,7 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const DATA_FILE = path.resolve(process.env.DATA_FILE || path.join(ROOT, 'data', 'tonusco.json'));
 const SESSION_TTL = 12 * 60 * 60 * 1000;
 const STAMP_COOLDOWN_MS = 48 * 60 * 60 * 1000;
-const STAMP_LIMIT = 10;
+const STAMP_LIMIT = 9;
 const sessions = new Map();
 const loginAttempts = new Map();
 const publicAttempts = new Map();
@@ -50,6 +50,7 @@ for (const guest of db.guests) {
     guest.stampProgress = Math.min(Math.max(Number(guest.visits) || 0, 0) * 2, STAMP_LIMIT);
     needsMigration = true;
   }
+  if (guest.stampProgress > STAMP_LIMIT) { guest.stampProgress = STAMP_LIMIT; needsMigration = true; }
   for (const event of guest.history) {
     if (event.type === 'stamp' && event.discountGranted == null) {
       event.discountGranted = Number(event.nextReward ?? Math.min((Number(event.visitNumber) || 0) * 5, 25));
@@ -102,7 +103,7 @@ function recordStamps(guest, { source, count = 1, discountUsed = false, purchase
   const numberOfStamps = Number(count);
   if (!Number.isInteger(numberOfStamps) || numberOfStamps < 1) return { error: 'Selecciona una cantidad válida de sellos.' };
   const progress = Math.min(Math.max(Number(guest.stampProgress) || 0, 0), STAMP_LIMIT);
-  if (progress >= STAMP_LIMIT) return { error: 'Esta tarjeta ya completó sus 10 sellos.' };
+  if (progress >= STAMP_LIMIT) return { error: 'Esta tarjeta ya completó sus 9 sellos.' };
   if (numberOfStamps > STAMP_LIMIT - progress) return { error: `Solo quedan ${STAMP_LIMIT - progress} sellos disponibles en esta tarjeta.` };
   const now = Date.now();
   const last = mostRecentStamp(guest);
