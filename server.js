@@ -148,6 +148,8 @@ function publicGuest(guest) {
   const history = (guest.history || []).filter((event) => event.type === 'stamp').map((event) => ({
     date: event.date,
     visitNumber: event.visitNumber || null,
+    stampNumber: event.stampNumber || null,
+    source: event.source || null,
     discountGranted: Number(event.discountGranted ?? event.nextReward ?? 0),
   })).reverse();
   return { name: guest.name, cardNo: guest.cardNo, visits: guest.visits, stampProgress: guest.stampProgress, reward: reward(guest.stampProgress), history };
