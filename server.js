@@ -145,7 +145,7 @@ function recordStamps(guest, { source, count = 1, discountUsed = false, purchase
   return { events };
 }
 function publicGuest(guest) {
-  const history = (guest.history || []).filter((event) => event.type === 'stamp').map((event) => ({
+  const history = (guest.history || []).filter((event) => event.type === 'stamp' && !event.voidedAt).map((event) => ({
     date: event.date,
     visitNumber: event.visitNumber || null,
     stampNumber: event.stampNumber || null,
@@ -216,6 +216,7 @@ function requireAdmin(req, res) {
 }
 
 function safeGuest(guest) {
+  const activeStamps = (guest.history || []).filter((item) => item.type === 'stamp' && !item.voidedAt);
   return {
     id: guest.id,
     cardNo: guest.cardNo,
@@ -226,7 +227,7 @@ function safeGuest(guest) {
     reward: reward(guest.stampProgress),
     createdAt: guest.createdAt,
     lastStampAt: guest.lastStampAt || null,
-    jacuzziPending: (guest.history || []).some((item) => item.jacuzziEarned === true || (Number(item.nextReward ?? item.discountGranted) === 25 && Number(item.visitNumber) === 5))
+    jacuzziPending: activeStamps.some((item) => item.jacuzziEarned === true || (Number(item.nextReward ?? item.discountGranted) === 25 && Number(item.stampNumber) === STAMP_LIMIT))
       && !(guest.history || []).some((item) => item.jacuzziDelivered === true),
     history: (guest.history || []).slice().reverse(),
   };
@@ -338,7 +339,7 @@ async function api(req, res, url) {
       const q = String(url.searchParams.get('q') || '').trim().toLowerCase();
       const phoneQuery = normalizePhone(q);
       const guests = db.guests
-        .filter((guest) => !q || guest.name.toLowerCase().includes(q) || (phoneQuery && guest.phone.includes(phoneQuery)))
+        .filter((guest) => !q || guest.name.toLowerCase().includes(q) || String(guest.cardNo || '').toLowerCase().includes(q) || (phoneQuery && guest.phone.includes(phoneQuery)))
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
         .map(safeGuest);
       return send(res, 200, { guests });
@@ -367,7 +368,7 @@ async function api(req, res, url) {
             });
             continue;
           }
-          if (item.type !== 'stamp') continue;
+          if (item.type !== 'stamp' || item.voidedAt) continue;
           const event = {
             guestId: guest.id,
             time: Date.parse(item.date),
@@ -542,6 +543,43 @@ async function api(req, res, url) {
         return send(res, 201, { guest: safeGuest(guest), events: result.events });
       } catch {
         return send(res, 400, { error: 'No pudimos registrar la estadía.' });
+      }
+    }
+
+    const removeStampsMatch = pathname.match(/^\/api\/admin\/guests\/([a-f0-9-]+)\/stamps\/remove$/i);
+    if (method === 'POST' && removeStampsMatch) {
+      try {
+        const { count = 1 } = await readJson(req);
+        const guest = db.guests.find((item) => item.id === removeStampsMatch[1]);
+        if (!guest) return send(res, 404, { error: 'No encontramos ese huésped.' });
+        const progress = Math.min(Math.max(Math.floor(Number(guest.stampProgress) || 0), 0), STAMP_LIMIT);
+        const numberToRemove = Number(count);
+        if (!Number.isInteger(numberToRemove) || numberToRemove < 1) return send(res, 400, { error: 'Selecciona una cantidad válida de sellos.' });
+        if (numberToRemove > progress) return send(res, 400, { error: `Esta tarjeta solo tiene ${progress} sellos para quitar.` });
+
+        const activeEvents = (guest.history || []).filter((item) => item.type === 'stamp' && !item.voidedAt)
+          .sort((a, b) => Number(b.stampNumber ?? b.visitNumber ?? 0) - Number(a.stampNumber ?? a.visitNumber ?? 0) || Date.parse(b.date) - Date.parse(a.date));
+        const affectedEvents = activeEvents.slice(0, numberToRemove);
+        const date = new Date().toISOString();
+        const stampNumbers = Array.from({ length: numberToRemove }, (_, index) => progress - numberToRemove + index + 1);
+        for (const item of affectedEvents) {
+          item.voidedAt = date;
+          item.voidedBy = 'reception';
+        }
+        guest.stampProgress = progress - numberToRemove;
+        guest.visits = Math.max(0, (Number(guest.visits) || 0) - numberToRemove);
+        const remainingStamps = (guest.history || []).filter((item) => item.type === 'stamp' && !item.voidedAt);
+        guest.lastStampAt = remainingStamps.map((item) => item.date).filter((value) => Number.isFinite(Date.parse(value)))
+          .sort((a, b) => Date.parse(b) - Date.parse(a))[0] || null;
+        guest.history = [...(guest.history || []), {
+          id: crypto.randomUUID(), type: 'adjustment', action: 'remove_stamps', source: 'reception', date,
+          count: numberToRemove, stampNumbers,
+        }];
+        guest.updatedAt = date;
+        writeDb();
+        return send(res, 200, { guest: safeGuest(guest), removedCount: numberToRemove });
+      } catch {
+        return send(res, 400, { error: 'No pudimos quitar los sellos.' });
       }
     }
     return send(res, 404, { error: 'No encontramos esa opción.' });
