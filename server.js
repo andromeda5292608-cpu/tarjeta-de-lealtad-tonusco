@@ -13,6 +13,7 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const DATA_FILE = path.resolve(process.env.DATA_FILE || path.join(ROOT, 'data', 'tonusco.json'));
 const SESSION_TTL = 12 * 60 * 60 * 1000;
 const STAMP_COOLDOWN_MS = 48 * 60 * 60 * 1000;
+const STAMP_LIMIT = 10;
 const sessions = new Map();
 const loginAttempts = new Map();
 const publicAttempts = new Map();
@@ -44,6 +45,17 @@ let needsMigration = false;
 for (const guest of db.guests) {
   if (!guest.cardNo) { guest.cardNo = createCardNo(db.guests); needsMigration = true; }
   if (!Array.isArray(guest.history)) { guest.history = []; needsMigration = true; }
+  // Keep the earned discount for cards created under the previous one-stamp-per-tier rules.
+  if (!Number.isInteger(guest.stampProgress)) {
+    guest.stampProgress = Math.min(Math.max(Number(guest.visits) || 0, 0) * 2, STAMP_LIMIT);
+    needsMigration = true;
+  }
+  for (const event of guest.history) {
+    if (event.type === 'stamp' && event.discountGranted == null) {
+      event.discountGranted = Number(event.nextReward ?? Math.min((Number(event.visitNumber) || 0) * 5, 25));
+      needsMigration = true;
+    }
+  }
 }
 if (needsMigration) writeDb();
 function writeDb() {
@@ -72,7 +84,7 @@ function normalizePhone(raw) {
   if (phone.startsWith('57') && phone.length === 12) phone = phone.slice(2);
   return phone;
 }
-function reward(visits) { return Math.min(Math.max(Number(visits) || 0, 0) * 5, 25); }
+function reward(stamps) { return Math.min(Math.ceil(Math.max(Number(stamps) || 0, 0) / 2) * 5, 25); }
 function createCardNo(guests = db.guests) {
   const used = new Set(guests.map((guest) => String(guest.cardNo || '')));
   for (let attempt = 0; attempt < 1000; attempt += 1) {
@@ -82,38 +94,64 @@ function createCardNo(guests = db.guests) {
   return String(crypto.randomInt(100000, 1000000));
 }
 function mostRecentStamp(guest) {
-  const dates = [guest.lastStampAt, ...(guest.history || []).map((event) => event.date)]
+  const dates = [guest.lastStampAt, ...(guest.history || []).filter((event) => event.type === 'stamp').map((event) => event.date)]
     .filter(Boolean).map((value) => Date.parse(value)).filter(Number.isFinite);
   return dates.length ? Math.max(...dates) : 0;
 }
-function recordStamp(guest, { source, discountUsed = null }) {
+function recordStamps(guest, { source, count = 1, discountUsed = false, purchaseAmount = null, jacuzziDelivered = false, bypassCooldown = false }) {
+  const numberOfStamps = Number(count);
+  if (!Number.isInteger(numberOfStamps) || numberOfStamps < 1) return { error: 'Selecciona una cantidad válida de sellos.' };
+  const progress = Math.min(Math.max(Number(guest.stampProgress) || 0, 0), STAMP_LIMIT);
+  if (progress >= STAMP_LIMIT) return { error: 'Esta tarjeta ya completó sus 10 sellos.' };
+  if (numberOfStamps > STAMP_LIMIT - progress) return { error: `Solo quedan ${STAMP_LIMIT - progress} sellos disponibles en esta tarjeta.` };
   const now = Date.now();
   const last = mostRecentStamp(guest);
-  if (last && now - last < STAMP_COOLDOWN_MS) {
+  if (!bypassCooldown && last && now - last < STAMP_COOLDOWN_MS) {
     const next = last + STAMP_COOLDOWN_MS;
     const date = new Intl.DateTimeFormat('es-CO', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'America/Bogota' }).format(new Date(next));
-    return { error: `Esta tarjeta ya recibió un sello. Podrá recibir el siguiente el ${date}.`, nextAllowedAt: new Date(next).toISOString() };
+    return { error: `Este sello ya fue registrado recientemente. Podrá registrarse otro el ${date}.`, nextAllowedAt: new Date(next).toISOString() };
   }
-  const previousReward = reward(guest.visits);
-  guest.visits = (Number(guest.visits) || 0) + 1;
-  const date = new Date(now).toISOString();
-  const event = {
-    id: crypto.randomUUID(), type: 'stamp', source, date,
-    visitNumber: guest.visits,
-    discountAtArrival: previousReward,
-    discountUsed: previousReward > 0 && source !== 'qr' ? Boolean(discountUsed) : null,
-    nextReward: reward(guest.visits),
-  };
-  guest.history = [...(guest.history || []), event];
-  guest.lastStampAt = date;
-  guest.updatedAt = date;
+  const previousReward = reward(progress);
+  const amount = Number(purchaseAmount);
+  const validPurchaseAmount = Number.isFinite(amount) && amount > 0 && amount <= 1000000000000 ? Math.round(amount) : null;
+  const events = [];
+  for (let index = 0; index < numberOfStamps; index += 1) {
+    const stampNumber = progress + index + 1;
+    const granted = reward(stampNumber);
+    const jacuzziEarned = granted === 25 && reward(stampNumber - 1) < 25;
+    const date = new Date(now).toISOString();
+    events.push({
+      id: crypto.randomUUID(), type: 'stamp', source, date,
+      visitNumber: (Number(guest.visits) || 0) + index + 1,
+      stampNumber,
+      discountAtArrival: previousReward,
+      discountGranted: granted,
+      discountUsed: source !== 'qr' && index === 0 && previousReward > 0 ? Boolean(discountUsed) : null,
+      purchaseAmount: source !== 'qr' && index === 0 ? validPurchaseAmount : null,
+      discountAmount: source !== 'qr' && index === 0 && previousReward > 0 && discountUsed && validPurchaseAmount
+        ? Math.round(validPurchaseAmount * previousReward / 100) : null,
+      jacuzziEarned,
+      jacuzziDelivered: jacuzziEarned && Boolean(jacuzziDelivered),
+      nextReward: granted,
+    });
+  }
+  guest.visits = (Number(guest.visits) || 0) + numberOfStamps;
+  guest.stampProgress = progress + numberOfStamps;
+  guest.history = [...(guest.history || []), ...events];
+  guest.lastStampAt = events[events.length - 1].date;
+  guest.updatedAt = guest.lastStampAt;
   writeDb();
-  return { event };
+  return { events };
 }
 function publicGuest(guest) {
-  return { name: guest.name, cardNo: guest.cardNo, visits: guest.visits, reward: reward(guest.visits) };
+  return { name: guest.name, cardNo: guest.cardNo, visits: guest.visits, stampProgress: guest.stampProgress, reward: reward(guest.stampProgress) };
 }
 function escapeCsv(value) { return `"${String(value ?? '').replace(/"/g, '""')}"`; }
+function localDateKey(value) {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(value));
+  const part = (type) => parts.find((item) => item.type === type)?.value || '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
+}
 
 async function readJson(req) {
   let raw = '';
@@ -176,10 +214,13 @@ function safeGuest(guest) {
     name: guest.name,
     phone: guest.phone,
     visits: guest.visits,
-    reward: reward(guest.visits),
+    stampProgress: guest.stampProgress,
+    reward: reward(guest.stampProgress),
     createdAt: guest.createdAt,
     lastStampAt: guest.lastStampAt || null,
-    history: (guest.history || []).slice(-8).reverse(),
+    jacuzziPending: (guest.history || []).some((item) => item.jacuzziEarned === true || (Number(item.nextReward ?? item.discountGranted) === 25 && Number(item.visitNumber) === 5))
+      && !(guest.history || []).some((item) => item.jacuzziDelivered === true),
+    history: (guest.history || []).slice().reverse(),
   };
 }
 
@@ -215,7 +256,7 @@ async function api(req, res, url) {
       const existing = db.guests.find((item) => item.phone === phone);
       if (existing) return send(res, 200, { card: publicGuest(existing), alreadyRegistered: true });
       const guest = {
-        id: crypto.randomUUID(), cardNo: createCardNo(), name, phone, visits: 0,
+        id: crypto.randomUUID(), cardNo: createCardNo(), name, phone, visits: 0, stampProgress: 0,
         createdAt: new Date().toISOString(), consentAt: new Date().toISOString(),
         source: 'self-service', history: [],
       };
@@ -236,9 +277,9 @@ async function api(req, res, url) {
       if (phone.length < 7 || phone.length > 15) return send(res, 400, { error: 'Escribe un número de celular válido.' });
       const guest = db.guests.find((item) => item.phone === phone);
       if (!guest) return send(res, 404, { error: 'No encontramos una tarjeta con ese celular. Inscríbete primero con el QR de registro.' });
-      const result = recordStamp(guest, { source: 'qr' });
-      if (result.error) return send(res, 429, result);
-      return send(res, 201, { card: publicGuest(guest), event: result.event });
+      const result = recordStamps(guest, { source: 'qr' });
+      if (result.error) return send(res, 429, { error: result.nextAllowedAt ? 'Este sello ya fue registrado recientemente. Consulta con recepción si necesitas ayuda.' : result.error });
+      return send(res, 201, { card: publicGuest(guest), events: result.events });
     } catch {
       return send(res, 400, { error: 'No pudimos registrar el sello. Verifica el celular e inténtalo de nuevo.' });
     }
@@ -295,9 +336,120 @@ async function api(req, res, url) {
       return send(res, 200, { guests });
     }
 
+    if (method === 'GET' && pathname === '/api/admin/stats') {
+      const range = String(url.searchParams.get('range') || '30');
+      const daysByRange = { '7': 7, '30': 30, '90': 90, '365': 365 };
+      const days = daysByRange[range] || null;
+      const now = Date.now();
+      const periodStart = range === 'all' ? 0 : now - (days || 30) * 24 * 60 * 60 * 1000;
+      const allEvents = [];
+      const allCheckouts = [];
+      const eventsByGuest = new Map();
+      for (const guest of db.guests) {
+        const guestEvents = [];
+        for (const item of guest.history || []) {
+          if (!Number.isFinite(Date.parse(item.date))) continue;
+          if (item.type === 'checkout') {
+            allCheckouts.push({
+              guestId: guest.id,
+              time: Date.parse(item.date),
+              discountUsed: item.discountUsed === true,
+              discountAmount: Number(item.discountAmount) || 0,
+              purchaseAmount: Number(item.purchaseAmount) || 0,
+            });
+            continue;
+          }
+          if (item.type !== 'stamp') continue;
+          const event = {
+            guestId: guest.id,
+            time: Date.parse(item.date),
+            date: item.date,
+            discountGranted: Number(item.discountGranted ?? item.nextReward ?? Math.min((Number(item.visitNumber) || 0) * 5, 25)),
+            discountUsed: item.discountUsed === true,
+            discountAmount: Number(item.discountAmount) || 0,
+            purchaseAmount: Number(item.purchaseAmount) || 0,
+            jacuzziEarned: item.jacuzziEarned === true || (Number(item.discountGranted ?? item.nextReward) === 25 && Number(item.visitNumber) === 5),
+            jacuzziDelivered: item.jacuzziDelivered === true,
+          };
+          guestEvents.push(event);
+          allEvents.push(event);
+        }
+        guestEvents.sort((a, b) => a.time - b.time);
+        eventsByGuest.set(guest.id, guestEvents);
+      }
+      const selectedEvents = allEvents.filter((item) => item.time >= periodStart);
+      const selectedCheckouts = allCheckouts.filter((item) => item.time >= periodStart);
+      const periodGuests = new Set(selectedEvents.map((item) => item.guestId));
+      const returningGuests = new Set([...periodGuests].filter((id) => (eventsByGuest.get(id) || []).length > 1));
+      const repeatRate = periodGuests.size ? Math.round(returningGuests.size * 100 / periodGuests.size) : 0;
+      const levels = [5, 10, 15, 20, 25];
+      const stampsByLevel = Object.fromEntries(levels.map((level) => [level, selectedEvents.filter((item) => item.discountGranted === level).length]));
+      const cardsByLevel = Object.fromEntries([0, ...levels].map((level) => [level, db.guests.filter((guest) => reward(guest.stampProgress) === level).length]));
+      const discountsUsed = [...selectedEvents.filter((item) => item.discountUsed), ...selectedCheckouts.filter((item) => item.discountUsed)];
+      const discountValue = Math.round(discountsUsed.reduce((sum, item) => sum + item.discountAmount, 0));
+      const trackedSales = Math.round(selectedEvents.reduce((sum, item) => sum + item.purchaseAmount, 0) + selectedCheckouts.reduce((sum, item) => sum + item.purchaseAmount, 0));
+      let totalGapDays = 0;
+      let gapCount = 0;
+      for (const guestEvents of eventsByGuest.values()) {
+        for (let i = 1; i < guestEvents.length; i += 1) {
+          const gap = (guestEvents[i].time - guestEvents[i - 1].time) / (24 * 60 * 60 * 1000);
+          if (gap > 0) { totalGapDays += gap; gapCount += 1; }
+        }
+      }
+      const jacuzziEvents = selectedEvents.filter((item) => item.jacuzziEarned);
+      const bucketIsMonth = range === '365' || range === 'all';
+      const bucketCount = bucketIsMonth ? 12 : (days || 30);
+      const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(now));
+      const currentYear = Number(parts.find((item) => item.type === 'year')?.value);
+      const currentMonth = Number(parts.find((item) => item.type === 'month')?.value);
+      const currentDay = Number(parts.find((item) => item.type === 'day')?.value);
+      const buckets = [];
+      if (bucketIsMonth) {
+        for (let index = bucketCount - 1; index >= 0; index -= 1) {
+          const date = new Date(Date.UTC(currentYear, currentMonth - 1 - index, 1));
+          const key = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+          const label = new Intl.DateTimeFormat('es-CO', { timeZone: 'UTC', month: 'short' }).format(date);
+          buckets.push({ key, label, count: 0 });
+        }
+      } else {
+        const firstDay = Date.UTC(currentYear, currentMonth - 1, currentDay - bucketCount + 1);
+        for (let index = 0; index < bucketCount; index += 1) {
+          const date = new Date(firstDay + index * 24 * 60 * 60 * 1000);
+          const key = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
+          const label = new Intl.DateTimeFormat('es-CO', { timeZone: 'UTC', day: 'numeric', month: 'short' }).format(date);
+          buckets.push({ key, label, count: 0 });
+        }
+      }
+      const bucketMap = new Map(buckets.map((bucket) => [bucket.key, bucket]));
+      for (const item of selectedEvents) {
+        const key = bucketIsMonth ? localDateKey(item.date).slice(0, 7) : localDateKey(item.date);
+        const bucket = bucketMap.get(key);
+        if (bucket) bucket.count += 1;
+      }
+      const newMembers = db.guests.filter((guest) => Date.parse(guest.createdAt) >= periodStart).length;
+      return send(res, 200, {
+        range,
+        totalCustomers: db.guests.length,
+        newMembers,
+        visits: selectedEvents.length,
+        customersWithVisits: periodGuests.size,
+        returningCustomers: returningGuests.size,
+        repeatRate,
+        averageDaysBetweenVisits: gapCount ? Math.round(totalGapDays / gapCount) : null,
+        stampsByLevel,
+        cardsByLevel,
+        discountsUsed: discountsUsed.length,
+        discountValue,
+        trackedSales,
+        jacuzziEarned: jacuzziEvents.length,
+        jacuzziDelivered: jacuzziEvents.filter((item) => item.jacuzziDelivered).length,
+        series: buckets,
+      });
+    }
+
     if (method === 'GET' && pathname === '/api/admin/export.csv') {
       const rows = [['Tarjeta', 'Nombre', 'Celular', 'Sellos', 'Descuento proxima visita', 'Ultimo sello', 'Creado']];
-      for (const guest of db.guests) rows.push([guest.cardNo, guest.name, guest.phone, guest.visits, `${reward(guest.visits)}%`, guest.lastStampAt || '', guest.createdAt]);
+      for (const guest of db.guests) rows.push([guest.cardNo, guest.name, guest.phone, guest.stampProgress || 0, `${reward(guest.stampProgress)}%`, guest.lastStampAt || '', guest.createdAt]);
       const csv = '\uFEFF' + rows.map((row) => row.map(escapeCsv).join(',')).join('\r\n');
       return send(res, 200, csv, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="tonusco-huespedes.csv"' });
     }
@@ -318,7 +470,7 @@ async function api(req, res, url) {
           writeDb();
           return send(res, 200, { guest: safeGuest(guest), updated: true });
         }
-        guest = { id: crypto.randomUUID(), cardNo: createCardNo(), name, phone, visits: 0, createdAt: new Date().toISOString(), consentAt: new Date().toISOString(), source: 'reception', history: [] };
+        guest = { id: crypto.randomUUID(), cardNo: createCardNo(), name, phone, visits: 0, stampProgress: 0, createdAt: new Date().toISOString(), consentAt: new Date().toISOString(), source: 'reception', history: [] };
         db.guests.push(guest);
         writeDb();
         return send(res, 201, { guest: safeGuest(guest), updated: false });
@@ -327,15 +479,59 @@ async function api(req, res, url) {
       }
     }
 
+    const checkoutMatch = pathname.match(/^\/api\/admin\/guests\/([a-f0-9-]+)\/checkouts$/i);
+    if (method === 'POST' && checkoutMatch) {
+      try {
+        const { discountRate = 0, discountUsed = false, purchaseAmount = null } = await readJson(req);
+        const guest = db.guests.find((item) => item.id === checkoutMatch[1]);
+        if (!guest) return send(res, 404, { error: 'No encontramos ese huésped.' });
+        const rate = Number(discountRate);
+        if (![0, 5, 10, 15, 20, 25].includes(rate) || rate > reward(guest.stampProgress)) {
+          return send(res, 400, { error: 'El descuento disponible de esta tarjeta cambió. Actualiza la búsqueda e inténtalo de nuevo.' });
+        }
+        if (discountUsed && rate === 0) return send(res, 400, { error: 'Esta tarjeta todavía no tiene un descuento para aplicar.' });
+        const amount = Number(purchaseAmount);
+        const validPurchaseAmount = Number.isFinite(amount) && amount > 0 && amount <= 1000000000000 ? Math.round(amount) : null;
+        const date = new Date().toISOString();
+        const event = {
+          id: crypto.randomUUID(), type: 'checkout', source: 'reception', date,
+          discountAtArrival: rate,
+          discountUsed: rate > 0 ? Boolean(discountUsed) : false,
+          purchaseAmount: validPurchaseAmount,
+          discountAmount: rate > 0 && discountUsed && validPurchaseAmount ? Math.round(validPurchaseAmount * rate / 100) : null,
+        };
+        guest.history = [...(guest.history || []), event];
+        guest.updatedAt = date;
+        writeDb();
+        return send(res, 201, { guest: safeGuest(guest), event });
+      } catch {
+        return send(res, 400, { error: 'No pudimos guardar el check-out.' });
+      }
+    }
+
+    const jacuzziMatch = pathname.match(/^\/api\/admin\/guests\/([a-f0-9-]+)\/jacuzzi-delivered$/i);
+    if (method === 'POST' && jacuzziMatch) {
+      const guest = db.guests.find((item) => item.id === jacuzziMatch[1]);
+      if (!guest) return send(res, 404, { error: 'No encontramos ese huésped.' });
+      const award = [...(guest.history || [])].reverse().find((item) => item.jacuzziEarned === true || (Number(item.nextReward ?? item.discountGranted) === 25 && Number(item.visitNumber) === 5));
+      if (!award) return send(res, 409, { error: 'Esta tarjeta todavía no tiene el beneficio de jacuzzi.' });
+      if (award.jacuzziDelivered) return send(res, 409, { error: 'El beneficio de jacuzzi ya fue marcado como entregado.' });
+      award.jacuzziEarned = true;
+      award.jacuzziDelivered = true;
+      award.jacuzziDeliveredAt = new Date().toISOString();
+      writeDb();
+      return send(res, 200, { guest: safeGuest(guest) });
+    }
+
     const stampMatch = pathname.match(/^\/api\/admin\/guests\/([a-f0-9-]+)\/stamps\/manual$/i);
     if (method === 'POST' && stampMatch) {
       try {
-        const { discountUsed = false } = await readJson(req);
+        const { discountUsed = false, count = 1, purchaseAmount = null, jacuzziDelivered = false } = await readJson(req);
         const guest = db.guests.find((item) => item.id === stampMatch[1]);
         if (!guest) return send(res, 404, { error: 'No encontramos ese huésped.' });
-        const result = recordStamp(guest, { source: 'reception', discountUsed });
+        const result = recordStamps(guest, { source: 'reception', count, discountUsed, purchaseAmount, jacuzziDelivered, bypassCooldown: true });
         if (result.error) return send(res, 429, result);
-        return send(res, 201, { guest: safeGuest(guest), event: result.event });
+        return send(res, 201, { guest: safeGuest(guest), events: result.events });
       } catch {
         return send(res, 400, { error: 'No pudimos registrar la estadía.' });
       }
