@@ -154,6 +154,28 @@ function publicGuest(guest) {
   })).reverse();
   return { name: guest.name, cardNo: guest.cardNo, visits: guest.visits, stampProgress: guest.stampProgress, reward: reward(guest.stampProgress), history };
 }
+function issueCardAccess(guest) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const hash = crypto.createHash('sha256').update(token).digest('hex');
+  const tokens = Array.isArray(guest.cardAccessTokens) ? guest.cardAccessTokens : [];
+  guest.cardAccessTokens = [...tokens.filter((item) => item && /^[a-f0-9]{64}$/.test(item.hash || '')), { hash, createdAt: new Date().toISOString() }].slice(-5);
+  return token;
+}
+function cardAccessCookie(token, req) {
+  const secure = process.env.NODE_ENV === 'production' || req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
+  return `tonusco_card=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000${secure}`;
+}
+function cardAccessGuest(req) {
+  const match = String(req.headers.cookie || '').match(/(?:^|;\s*)tonusco_card=([a-f0-9]{64})(?:;|$)/);
+  if (!match) return null;
+  const candidate = crypto.createHash('sha256').update(match[1]).digest();
+  return db.guests.find((guest) => (guest.cardAccessTokens || []).some((item) => {
+    try {
+      const stored = Buffer.from(item.hash, 'hex');
+      return stored.length === candidate.length && crypto.timingSafeEqual(stored, candidate);
+    } catch { return false; }
+  })) || null;
+}
 function escapeCsv(value) { return `"${String(value ?? '').replace(/"/g, '""')}"`; }
 function localDateKey(value) {
   const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(value));
@@ -252,6 +274,14 @@ async function api(req, res, url) {
     }
   }
 
+  if (method === 'POST' && pathname === '/api/card/access') {
+    if (!originAllowed(req)) return send(res, 403, { error: 'Solicitud no permitida.' });
+    if (!allowPublicRequest(req, 'card-access', 120)) return send(res, 429, { error: 'Inténtalo de nuevo más tarde.' });
+    const guest = cardAccessGuest(req);
+    if (!guest) return send(res, 401, { error: 'No encontramos el acceso guardado de esta tarjeta. Vuelve a inscribirte con el QR de registro.' });
+    return send(res, 200, { card: publicGuest(guest) });
+  }
+
   if (method === 'POST' && pathname === '/api/enroll') {
     if (!originAllowed(req)) return send(res, 403, { error: 'Solicitud no permitida.' });
     if (!allowPublicRequest(req, 'enroll', 50)) return send(res, 429, { error: 'Se alcanzó el límite de registros desde esta red. Inténtalo más tarde.' });
@@ -263,15 +293,20 @@ async function api(req, res, url) {
       if (phone.length < 7 || phone.length > 15) return send(res, 400, { error: 'Escribe un número de celular válido.' });
       if (consent !== true) return send(res, 400, { error: 'Debes aceptar el uso de tus datos para crear la tarjeta.' });
       const existing = db.guests.find((item) => item.phone === phone);
-      if (existing) return send(res, 200, { card: publicGuest(existing), alreadyRegistered: true });
+      if (existing) {
+        const token = issueCardAccess(existing);
+        writeDb();
+        return send(res, 200, { card: publicGuest(existing), alreadyRegistered: true }, { 'Set-Cookie': cardAccessCookie(token, req) });
+      }
       const guest = {
         id: crypto.randomUUID(), cardNo: createCardNo(), name, phone, visits: 0, stampProgress: 0,
         createdAt: new Date().toISOString(), consentAt: new Date().toISOString(),
         source: 'self-service', history: [],
       };
+      const token = issueCardAccess(guest);
       db.guests.push(guest);
       writeDb();
-      return send(res, 201, { card: publicGuest(guest), alreadyRegistered: false });
+      return send(res, 201, { card: publicGuest(guest), alreadyRegistered: false }, { 'Set-Cookie': cardAccessCookie(token, req) });
     } catch {
       return send(res, 400, { error: 'No pudimos crear la tarjeta. Verifica los datos e inténtalo de nuevo.' });
     }
@@ -587,7 +622,7 @@ async function api(req, res, url) {
   return null;
 }
 
-const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.jpg': 'image/jpeg', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
+const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.jpg': 'image/jpeg', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json; charset=utf-8' };
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -599,7 +634,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'Método no permitido.');
     let pathname = decodeURIComponent(url.pathname);
     if (pathname === '/' || pathname === '/registro' || pathname === '/sello') pathname = '/index.html';
-    const allowed = new Set(['/index.html', '/logo-tonusco.jpg', '/favicon.ico']);
+    const allowed = new Set(['/index.html', '/logo-tonusco.jpg', '/favicon.ico', '/manifest.webmanifest', '/service-worker.js', '/icon-tonusco.svg', '/icon-tonusco-192.png', '/icon-tonusco-512.png']);
     if (!allowed.has(pathname)) return send(res, 404, 'Página no encontrada.');
     const file = path.join(ROOT, pathname.slice(1));
     if (!fs.existsSync(file)) return send(res, 404, 'Página no encontrada.');

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="tonusco" x1="0" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#ffe329"/>
+      <stop offset="0.58" stop-color="#f28b16"/>
+      <stop offset="1" stop-color="#ed3527"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="108" fill="#173b2d"/>
+  <path d="M91 94h330v104H302v223H210V198H91z" fill="#111713" opacity=".7" transform="translate(0 9)"/>
+  <path d="M91 83h330v104H302v223H210V187H91z" fill="url(#tonusco)" stroke="#111713" stroke-width="17" stroke-linejoin="round"/>
+  <circle cx="382" cy="374" r="12" fill="#f5e6d2"/>
+</svg>

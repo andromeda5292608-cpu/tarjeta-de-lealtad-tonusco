@@ -1,0 +1,39 @@
+{
+  "id": "/",
+  "name": "Tarjeta de lealtad Tonusco Campestre",
+  "short_name": "Club Tonusco",
+  "description": "Tu tarjeta VIP de Hostería Tonusco Campestre.",
+  "start_url": "/?tarjeta=guardada",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#fbf6e9",
+  "theme_color": "#173b2d",
+  "icons": [
+    {
+      "src": "/icon-tonusco-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-tonusco-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-tonusco.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Ver mi tarjeta",
+      "short_name": "Mi tarjeta",
+      "url": "/?tarjeta=guardada",
+      "icons": [{ "src": "/icon-tonusco.svg", "sizes": "any", "type": "image/svg+xml" }]
+    }
+  ]
+}
