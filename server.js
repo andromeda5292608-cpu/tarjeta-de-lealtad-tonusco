@@ -4,6 +4,8 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const os = require('node:os');
+const { execFileSync } = require('node:child_process');
 
 const ROOT = __dirname;
 loadEnv(path.join(ROOT, '.env'));
@@ -176,6 +178,177 @@ function cardAccessGuest(req) {
     } catch { return false; }
   })) || null;
 }
+function walletGoogleEnabled() {
+  if (!/^\d+$/.test(String(process.env.GOOGLE_WALLET_ISSUER_ID || '').trim()) || !String(process.env.GOOGLE_WALLET_SERVICE_ACCOUNT_EMAIL || '').includes('@')) return false;
+  try {
+    const privateKey = String(process.env.GOOGLE_WALLET_SERVICE_ACCOUNT_PRIVATE_KEY || '').replace(/\\n/g, '\n');
+    crypto.createPrivateKey(privateKey);
+    return true;
+  } catch { return false; }
+}
+function walletAppleEnabled() {
+  return Boolean(process.env.APPLE_PASS_CERT_P12_BASE64 && process.env.APPLE_PASS_CERT_PASSWORD && process.env.APPLE_PASS_TYPE_IDENTIFIER && process.env.APPLE_TEAM_IDENTIFIER && process.env.APPLE_WWDR_CERT_BASE64);
+}
+function requestOrigin(req) {
+  const proto = req.headers['x-forwarded-proto'] ? String(req.headers['x-forwarded-proto']).split(',')[0].trim() : (req.socket.encrypted ? 'https' : 'http');
+  const host = req.headers['x-forwarded-host'] ? String(req.headers['x-forwarded-host']).split(',')[0].trim() : req.headers.host;
+  return `${proto}://${host}`;
+}
+function base64url(value) { return Buffer.from(value).toString('base64url'); }
+function googleWalletUrl(guest, origin) {
+  const issuerId = String(process.env.GOOGLE_WALLET_ISSUER_ID || '').trim();
+  if (!/^\d+$/.test(issuerId)) throw new Error('El emisor de Google Wallet no está configurado correctamente.');
+  const classId = `${issuerId}.tonuscoLoyalty`;
+  const objectId = `${issuerId}.member_${guest.id.replace(/-/g, '')}`;
+  const progress = Math.min(Number(guest.stampProgress) || 0, STAMP_LIMIT);
+  const passClass = {
+    id: classId,
+    issuerName: 'Hostería Tonusco',
+    programName: 'Tarjeta VIP Tonusco',
+    reviewStatus: 'underReview',
+    hexBackgroundColor: '#173B2D',
+    accountNameLabel: 'Titular',
+    accountIdLabel: 'Tarjeta',
+    programLogo: {
+      sourceUri: { uri: `${origin}/icon-tonusco-192.png` },
+      contentDescription: { defaultValue: { language: 'es-CO', value: 'Hostería Tonusco Campestre' } },
+    },
+  };
+  const passObject = {
+    id: objectId,
+    classId,
+    state: 'active',
+    accountName: guest.name,
+    accountId: String(guest.cardNo),
+    barcode: { type: 'QR_CODE', value: String(guest.cardNo), alternateText: `Tarjeta VIP ${guest.cardNo}` },
+    loyaltyPoints: { label: 'Sellos', balance: { string: `${progress}/9` } },
+    secondaryLoyaltyPoints: { label: 'Descuento', balance: { string: `${reward(progress)}%` } },
+  };
+  const header = base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
+  const claims = base64url(JSON.stringify({
+    iss: String(process.env.GOOGLE_WALLET_SERVICE_ACCOUNT_EMAIL).trim(),
+    aud: 'google',
+    typ: 'savetowallet',
+    origins: [origin],
+    payload: { loyaltyClasses: [passClass], loyaltyObjects: [passObject] },
+  }));
+  const privateKey = String(process.env.GOOGLE_WALLET_SERVICE_ACCOUNT_PRIVATE_KEY).replace(/\\n/g, '\n');
+  const unsigned = `${header}.${claims}`;
+  const signature = crypto.sign('RSA-SHA256', Buffer.from(unsigned), privateKey).toString('base64url');
+  const jwt = `${unsigned}.${signature}`;
+  if (jwt.length > 1800) throw new Error('La tarjeta de Wallet supera el tamaño permitido para el enlace.');
+  return `https://pay.google.com/gp/v/save/${jwt}`;
+}
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+function makeZip(files) {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  const now = new Date();
+  const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | Math.floor(now.getSeconds() / 2);
+  const dosDate = ((Math.max(now.getFullYear(), 1980) - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  for (const [fileName, rawContent] of Object.entries(files)) {
+    const name = Buffer.from(fileName, 'utf8');
+    const content = Buffer.isBuffer(rawContent) ? rawContent : Buffer.from(rawContent);
+    const checksum = crc32(content);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x800, 6);
+    local.writeUInt16LE(0, 8); local.writeUInt16LE(dosTime, 10); local.writeUInt16LE(dosDate, 12);
+    local.writeUInt32LE(checksum, 14); local.writeUInt32LE(content.length, 18); local.writeUInt32LE(content.length, 22);
+    local.writeUInt16LE(name.length, 26); local.writeUInt16LE(0, 28);
+    localParts.push(local, name, content);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0x800, 8); central.writeUInt16LE(0, 10); central.writeUInt16LE(dosTime, 12); central.writeUInt16LE(dosDate, 14);
+    central.writeUInt32LE(checksum, 16); central.writeUInt32LE(content.length, 20); central.writeUInt32LE(content.length, 24);
+    central.writeUInt16LE(name.length, 28); central.writeUInt16LE(0, 30); central.writeUInt16LE(0, 32);
+    central.writeUInt16LE(0, 34); central.writeUInt16LE(0, 36); central.writeUInt32LE(0, 38); central.writeUInt32LE(offset, 42);
+    centralParts.push(central, name);
+    offset += local.length + name.length + content.length;
+  }
+  const centralDirectory = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(0, 4); end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(Object.keys(files).length, 8); end.writeUInt16LE(Object.keys(files).length, 10);
+  end.writeUInt32LE(centralDirectory.length, 12); end.writeUInt32LE(offset, 16); end.writeUInt16LE(0, 20);
+  return Buffer.concat([...localParts, centralDirectory, end]);
+}
+function appleCertificatePem(temporaryDirectory) {
+  const encoded = String(process.env.APPLE_WWDR_CERT_BASE64).trim();
+  const raw = encoded.includes('-----BEGIN CERTIFICATE-----') ? Buffer.from(encoded) : Buffer.from(encoded, 'base64');
+  const certPath = path.join(temporaryDirectory, 'wwdr-input');
+  const pemPath = path.join(temporaryDirectory, 'wwdr.pem');
+  fs.writeFileSync(certPath, raw, { mode: 0o600 });
+  if (raw.toString('utf8').includes('-----BEGIN CERTIFICATE-----')) fs.copyFileSync(certPath, pemPath);
+  else execFileSync('openssl', ['x509', '-inform', 'DER', '-in', certPath, '-out', pemPath]);
+  return pemPath;
+}
+function appleWalletPass(guest) {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'tonusco-wallet-'));
+  try {
+    const p12Path = path.join(temporaryDirectory, 'signer.p12');
+    const certPath = path.join(temporaryDirectory, 'signer-cert.pem');
+    const keyPath = path.join(temporaryDirectory, 'signer-key.pem');
+    const manifestPath = path.join(temporaryDirectory, 'manifest.json');
+    const signaturePath = path.join(temporaryDirectory, 'signature');
+    const passPassword = String(process.env.APPLE_PASS_CERT_PASSWORD);
+    const commandEnv = { ...process.env, TONUSCO_APPLE_CERT_PASSWORD: passPassword };
+    fs.writeFileSync(p12Path, Buffer.from(String(process.env.APPLE_PASS_CERT_P12_BASE64).trim(), 'base64'), { mode: 0o600 });
+    execFileSync('openssl', ['pkcs12', '-in', p12Path, '-clcerts', '-nokeys', '-out', certPath, '-passin', 'env:TONUSCO_APPLE_CERT_PASSWORD'], { env: commandEnv, stdio: 'ignore' });
+    execFileSync('openssl', ['pkcs12', '-in', p12Path, '-nocerts', '-nodes', '-out', keyPath, '-passin', 'env:TONUSCO_APPLE_CERT_PASSWORD'], { env: commandEnv, stdio: 'ignore' });
+    const progress = Math.min(Number(guest.stampProgress) || 0, STAMP_LIMIT);
+    const pass = {
+      formatVersion: 1,
+      passTypeIdentifier: String(process.env.APPLE_PASS_TYPE_IDENTIFIER).trim(),
+      serialNumber: `tonusco-${guest.id}`,
+      teamIdentifier: String(process.env.APPLE_TEAM_IDENTIFIER).trim(),
+      organizationName: 'Hostería Tonusco Campestre',
+      description: 'Tarjeta VIP de lealtad Tonusco Campestre',
+      logoText: 'Tonusco Campestre',
+      foregroundColor: 'rgb(255, 255, 255)',
+      backgroundColor: 'rgb(23, 59, 45)',
+      labelColor: 'rgb(241, 181, 28)',
+      storeCard: {
+        primaryFields: [{ key: 'member', label: 'TITULAR', value: guest.name }],
+        secondaryFields: [
+          { key: 'reward', label: 'DESCUENTO', value: `${reward(progress)}%` },
+          { key: 'stamps', label: 'SELLOS', value: `${progress}/9` },
+        ],
+        backFields: [
+          { key: 'benefit', label: 'BENEFICIO', value: 'Al alcanzar el 25%, el titular y sus acompañantes reciben una hora de jacuzzi.' },
+          { key: 'terms', label: 'CONDICIONES', value: 'Tarjeta permanente y no transferible. Aplica a consumos de hospedaje o días de sol. No acumulable con otras promociones.' },
+          { key: 'web', label: 'HOSTERÍA TONUSCO CAMPESTRE', value: 'https://www.tonuscocampestre.com' },
+        ],
+      },
+      barcode: { format: 'PKBarcodeFormatQR', message: String(guest.cardNo), messageEncoding: 'iso-8859-1', altText: `Tarjeta VIP ${guest.cardNo}` },
+      barcodes: [{ format: 'PKBarcodeFormatQR', message: String(guest.cardNo), messageEncoding: 'iso-8859-1', altText: `Tarjeta VIP ${guest.cardNo}` }],
+    };
+    const files = {
+      'pass.json': Buffer.from(JSON.stringify(pass)),
+      'icon.png': fs.readFileSync(path.join(ROOT, 'icon-tonusco-192.png')),
+      'logo.png': fs.readFileSync(path.join(ROOT, 'icon-tonusco-192.png')),
+    };
+    const manifest = Object.fromEntries(Object.entries(files).map(([name, content]) => [name, crypto.createHash('sha1').update(content).digest('hex')]));
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    const wwdrPath = appleCertificatePem(temporaryDirectory);
+    execFileSync('openssl', ['smime', '-sign', '-binary', '-in', manifestPath, '-signer', certPath, '-inkey', keyPath, '-certfile', wwdrPath, '-out', signaturePath, '-outform', 'DER'], { stdio: 'ignore' });
+    files['manifest.json'] = fs.readFileSync(manifestPath);
+    files.signature = fs.readFileSync(signaturePath);
+    return makeZip(files);
+  } catch (error) {
+    console.error('No se pudo preparar el pase de Apple Wallet:', error.message);
+    throw new Error('No pudimos preparar la tarjeta para Apple Wallet. Revisa el certificado y la configuración de Wallet.');
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+}
 function escapeCsv(value) { return `"${String(value ?? '').replace(/"/g, '""')}"`; }
 function localDateKey(value) {
   const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(value));
@@ -259,6 +432,37 @@ async function api(req, res, url) {
   const method = req.method;
   const pathname = url.pathname;
   if (method === 'GET' && pathname === '/api/health') return send(res, 200, { ok: true });
+  if (method === 'GET' && pathname === '/api/wallet/status') {
+    return send(res, 200, { google: walletGoogleEnabled(), apple: walletAppleEnabled() });
+  }
+  if (method === 'GET' && (pathname === '/wallet/google' || pathname === '/wallet/apple')) {
+    const provider = pathname.endsWith('/google') ? 'google' : 'apple';
+    if (!allowPublicRequest(req, `wallet-${provider}`, 20)) return send(res, 429, 'Inténtalo de nuevo más tarde.');
+    const guest = cardAccessGuest(req);
+    if (!guest) return send(res, 401, 'Vuelve a consultar tu tarjeta con el número de celular para continuar.');
+    try {
+      if (provider === 'google') {
+        if (!walletGoogleEnabled()) return send(res, 503, 'Google Wallet aún no está configurado para Tonusco.');
+        const target = googleWalletUrl(guest, requestOrigin(req));
+        res.writeHead(303, { Location: target, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
+        return res.end();
+      }
+      if (!walletAppleEnabled()) return send(res, 503, 'Apple Wallet aún no está configurado para Tonusco.');
+      const pass = appleWalletPass(guest);
+      res.writeHead(200, {
+        'Content-Type': 'application/vnd.apple.pkpass',
+        'Content-Disposition': `attachment; filename="tonusco-${String(guest.cardNo).replace(/[^a-zA-Z0-9_-]/g, '')}.pkpass"`,
+        'Content-Length': pass.length,
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'no-referrer',
+      });
+      return res.end(pass);
+    } catch (error) {
+      console.error(`No se pudo generar la tarjeta de ${provider} Wallet:`, error.message);
+      return send(res, 503, { error: error.message || 'No pudimos preparar la tarjeta para Wallet.' });
+    }
+  }
 
   if (method === 'POST' && pathname === '/api/card') {
     if (!originAllowed(req)) return send(res, 403, { error: 'Solicitud no permitida.' });
@@ -629,7 +833,7 @@ const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=u
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-    if (url.pathname.startsWith('/api/')) {
+    if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/wallet/')) {
       const result = await api(req, res, url);
       if (result !== null) return;
       return send(res, 404, { error: 'No encontramos esa opción.' });

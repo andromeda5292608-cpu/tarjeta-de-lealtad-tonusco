@@ -13,6 +13,22 @@ services:
         sync: false
       - key: DATA_FILE
         value: /data/tonusco.json
+      - key: GOOGLE_WALLET_ISSUER_ID
+        sync: false
+      - key: GOOGLE_WALLET_SERVICE_ACCOUNT_EMAIL
+        sync: false
+      - key: GOOGLE_WALLET_SERVICE_ACCOUNT_PRIVATE_KEY
+        sync: false
+      - key: APPLE_PASS_TYPE_IDENTIFIER
+        sync: false
+      - key: APPLE_TEAM_IDENTIFIER
+        sync: false
+      - key: APPLE_PASS_CERT_P12_BASE64
+        sync: false
+      - key: APPLE_PASS_CERT_PASSWORD
+        sync: false
+      - key: APPLE_WWDR_CERT_BASE64
+        sync: false
     disk:
       name: tonusco-data
       mountPath: /data
