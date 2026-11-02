@@ -261,6 +261,7 @@ async function api(req, res, url) {
   if (method === 'GET' && pathname === '/api/health') return send(res, 200, { ok: true });
 
   if (method === 'POST' && pathname === '/api/card') {
+    if (!originAllowed(req)) return send(res, 403, { error: 'Solicitud no permitida.' });
     if (!allowPublicRequest(req, 'card', 120)) return send(res, 429, { error: 'Has hecho muchas consultas. Inténtalo más tarde.' });
     try {
       const { phone: rawPhone } = await readJson(req);
@@ -268,7 +269,9 @@ async function api(req, res, url) {
       if (phone.length < 7 || phone.length > 15) return send(res, 400, { error: 'Escribe un número de celular válido.' });
       const guest = db.guests.find((item) => item.phone === phone);
       if (!guest) return send(res, 404, { error: 'No encontramos una tarjeta con ese número.' });
-      return send(res, 200, { card: publicGuest(guest) });
+      const token = issueCardAccess(guest);
+      writeDb();
+      return send(res, 200, { card: publicGuest(guest) }, { 'Set-Cookie': cardAccessCookie(token, req) });
     } catch {
       return send(res, 400, { error: 'No pudimos consultar la tarjeta. Intenta de nuevo.' });
     }
