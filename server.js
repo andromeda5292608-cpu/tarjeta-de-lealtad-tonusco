@@ -97,7 +97,10 @@ function createCardNo(guests = db.guests) {
   return String(crypto.randomInt(100000, 1000000));
 }
 function mostRecentStamp(guest) {
-  const dates = [guest.lastStampAt, ...(guest.history || []).filter((event) => event.type === 'stamp').map((event) => event.date)]
+  const history = guest.history || [];
+  const stampEvents = history.filter((event) => event.type === 'stamp' && !event.voidedAt && !event.deletedAt);
+  const legacyFallback = !stampEvents.length && !history.some((event) => event.type === 'stamp') ? [guest.lastStampAt] : [];
+  const dates = [...legacyFallback, ...stampEvents.map((event) => event.date)]
     .filter(Boolean).map((value) => Date.parse(value)).filter(Number.isFinite);
   return dates.length ? Math.max(...dates) : 0;
 }
@@ -147,7 +150,7 @@ function recordStamps(guest, { source, count = 1, discountUsed = false, purchase
   return { events };
 }
 function publicGuest(guest) {
-  const history = (guest.history || []).filter((event) => event.type === 'stamp' && !event.voidedAt).map((event) => ({
+  const history = (guest.history || []).filter((event) => event.type === 'stamp' && !event.voidedAt && !event.deletedAt).map((event) => ({
     date: event.date,
     visitNumber: event.visitNumber || null,
     stampNumber: event.stampNumber || null,
@@ -411,7 +414,7 @@ function requireAdmin(req, res) {
 }
 
 function safeGuest(guest) {
-  const activeStamps = (guest.history || []).filter((item) => item.type === 'stamp' && !item.voidedAt);
+  const activeStamps = (guest.history || []).filter((item) => item.type === 'stamp' && !item.voidedAt && !item.deletedAt);
   return {
     id: guest.id,
     cardNo: guest.cardNo,
@@ -423,8 +426,8 @@ function safeGuest(guest) {
     createdAt: guest.createdAt,
     lastStampAt: guest.lastStampAt || null,
     jacuzziPending: activeStamps.some((item) => item.jacuzziEarned === true || (Number(item.nextReward ?? item.discountGranted) === 25 && Number(item.stampNumber) === STAMP_LIMIT))
-      && !(guest.history || []).some((item) => item.jacuzziDelivered === true),
-    history: (guest.history || []).slice().reverse(),
+      && !(guest.history || []).some((item) => item.jacuzziDelivered === true && !item.deletedAt),
+    history: (guest.history || []).filter((item) => !item.deletedAt).slice().reverse(),
   };
 }
 
@@ -577,6 +580,56 @@ async function api(req, res, url) {
     if (!requireAdmin(req, res)) return;
     if (!originAllowed(req)) return send(res, 403, { error: 'Solicitud no permitida.' });
 
+    const deleteHistoryMatch = pathname.match(/^\/api\/admin\/guests\/([a-f0-9-]+)\/history\/delete$/i);
+    if (method === 'POST' && deleteHistoryMatch) {
+      try {
+        const { eventIds, confirmDelete } = await readJson(req);
+        if (confirmDelete !== true) return send(res, 400, { error: 'Confirma que quieres eliminar los registros seleccionados.' });
+        if (!Array.isArray(eventIds) || eventIds.length < 1 || eventIds.length > 100 || eventIds.some((id) => typeof id !== 'string' || id.length > 80) || new Set(eventIds).size !== eventIds.length) {
+          return send(res, 400, { error: 'Selecciona entre 1 y 100 registros únicos del historial.' });
+        }
+        const guest = db.guests.find((item) => item.id === deleteHistoryMatch[1]);
+        if (!guest) return send(res, 404, { error: 'No encontramos ese huésped.' });
+        const selected = (guest.history || []).filter((item) => eventIds.includes(item.id) && !item.deletedAt);
+        if (selected.length !== eventIds.length) return send(res, 409, { error: 'Algunos registros cambiaron. Actualiza el historial e inténtalo de nuevo.' });
+        if (selected.some((item) => item.type === 'stamp' && (item.jacuzziEarned === true || item.jacuzziDelivered === true))) {
+          return send(res, 409, { error: 'No se puede eliminar el sello asociado al beneficio del jacuzzi. Usa “Quitar sellos” para corregir el avance; el registro del beneficio se conservará.' });
+        }
+
+        const removedStamps = selected.filter((item) => item.type === 'stamp' && !item.voidedAt).length;
+        const removedCheckouts = selected.filter((item) => item.type === 'checkout').length;
+        const removedOther = selected.length - removedStamps - removedCheckouts;
+        const deletedAt = new Date().toISOString();
+        for (const item of selected) {
+          item.deletedAt = deletedAt;
+          item.deletedBy = 'reception';
+        }
+        if (removedStamps) {
+          guest.stampProgress = Math.max(0, Math.min(Number(guest.stampProgress) || 0, STAMP_LIMIT) - removedStamps);
+          guest.visits = Math.max(0, (Number(guest.visits) || 0) - removedStamps);
+          const remainingStamps = (guest.history || []).filter((item) => item.type === 'stamp' && !item.voidedAt && !item.deletedAt)
+            .sort((a, b) => Date.parse(a.date) - Date.parse(b.date) || Number(a.stampNumber ?? a.visitNumber ?? 0) - Number(b.stampNumber ?? b.visitNumber ?? 0));
+          if (remainingStamps.length === guest.stampProgress) {
+            remainingStamps.forEach((item, index) => {
+              const currentStamp = index + 1;
+              item.stampNumber = currentStamp;
+              item.visitNumber = currentStamp;
+              item.discountAtArrival = reward(index);
+              item.discountGranted = reward(currentStamp);
+              item.nextReward = item.discountGranted;
+            });
+          }
+          guest.lastStampAt = remainingStamps.map((item) => item.date).filter((value) => Number.isFinite(Date.parse(value)))
+            .sort((a, b) => Date.parse(b) - Date.parse(a))[0] || null;
+        }
+        guest.updatedAt = deletedAt;
+        writeDb();
+        return send(res, 200, { guest: safeGuest(guest), removedCount: selected.length, removedStamps, removedCheckouts, removedOther });
+      } catch {
+        return send(res, 400, { error: 'No pudimos actualizar el historial.' });
+      }
+    }
+
     if (method === 'GET' && pathname === '/api/admin/guests') {
       const q = String(url.searchParams.get('q') || '').trim().toLowerCase();
       const phoneQuery = normalizePhone(q);
@@ -601,6 +654,7 @@ async function api(req, res, url) {
         for (const item of guest.history || []) {
           if (!Number.isFinite(Date.parse(item.date))) continue;
           if (item.type === 'checkout') {
+            if (item.deletedAt) continue;
             allCheckouts.push({
               guestId: guest.id,
               time: Date.parse(item.date),
@@ -610,7 +664,7 @@ async function api(req, res, url) {
             });
             continue;
           }
-          if (item.type !== 'stamp' || item.voidedAt) continue;
+          if (item.type !== 'stamp' || item.voidedAt || item.deletedAt) continue;
           const event = {
             guestId: guest.id,
             time: Date.parse(item.date),
@@ -619,7 +673,7 @@ async function api(req, res, url) {
             discountUsed: item.discountUsed === true,
             discountAmount: Number(item.discountAmount) || 0,
             purchaseAmount: Number(item.purchaseAmount) || 0,
-            jacuzziEarned: item.jacuzziEarned === true || (Number(item.discountGranted ?? item.nextReward) === 25 && Number(item.visitNumber) === 5),
+            jacuzziEarned: item.jacuzziEarned === true || (Number(item.discountGranted ?? item.nextReward) === 25 && Number(item.visitNumber) === STAMP_LIMIT),
             jacuzziDelivered: item.jacuzziDelivered === true,
           };
           guestEvents.push(event);
@@ -764,7 +818,7 @@ async function api(req, res, url) {
     if (method === 'POST' && jacuzziMatch) {
       const guest = db.guests.find((item) => item.id === jacuzziMatch[1]);
       if (!guest) return send(res, 404, { error: 'No encontramos ese huésped.' });
-      const award = [...(guest.history || [])].reverse().find((item) => item.jacuzziEarned === true || (Number(item.nextReward ?? item.discountGranted) === 25 && Number(item.visitNumber) === 5));
+      const award = [...(guest.history || [])].reverse().find((item) => !item.deletedAt && (item.jacuzziEarned === true || (Number(item.nextReward ?? item.discountGranted) === 25 && Number(item.visitNumber) === STAMP_LIMIT)));
       if (!award) return send(res, 409, { error: 'Esta tarjeta todavía no tiene el beneficio de jacuzzi.' });
       if (award.jacuzziDelivered) return send(res, 409, { error: 'El beneficio de jacuzzi ya fue marcado como entregado.' });
       award.jacuzziEarned = true;
@@ -799,7 +853,7 @@ async function api(req, res, url) {
         if (!Number.isInteger(numberToRemove) || numberToRemove < 1) return send(res, 400, { error: 'Selecciona una cantidad válida de sellos.' });
         if (numberToRemove > progress) return send(res, 400, { error: `Esta tarjeta solo tiene ${progress} sellos para quitar.` });
 
-        const activeEvents = (guest.history || []).filter((item) => item.type === 'stamp' && !item.voidedAt)
+        const activeEvents = (guest.history || []).filter((item) => item.type === 'stamp' && !item.voidedAt && !item.deletedAt)
           .sort((a, b) => Number(b.stampNumber ?? b.visitNumber ?? 0) - Number(a.stampNumber ?? a.visitNumber ?? 0) || Date.parse(b.date) - Date.parse(a.date));
         const affectedEvents = activeEvents.slice(0, numberToRemove);
         const date = new Date().toISOString();
@@ -810,7 +864,7 @@ async function api(req, res, url) {
         }
         guest.stampProgress = progress - numberToRemove;
         guest.visits = Math.max(0, (Number(guest.visits) || 0) - numberToRemove);
-        const remainingStamps = (guest.history || []).filter((item) => item.type === 'stamp' && !item.voidedAt);
+        const remainingStamps = (guest.history || []).filter((item) => item.type === 'stamp' && !item.voidedAt && !item.deletedAt);
         guest.lastStampAt = remainingStamps.map((item) => item.date).filter((value) => Number.isFinite(Date.parse(value)))
           .sort((a, b) => Date.parse(b) - Date.parse(a))[0] || null;
         guest.history = [...(guest.history || []), {
