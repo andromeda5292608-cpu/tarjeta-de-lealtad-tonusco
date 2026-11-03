@@ -104,7 +104,7 @@ function mostRecentStamp(guest) {
     .filter(Boolean).map((value) => Date.parse(value)).filter(Number.isFinite);
   return dates.length ? Math.max(...dates) : 0;
 }
-function recordStamps(guest, { source, count = 1, discountUsed = false, purchaseAmount = null, jacuzziDelivered = false, bypassCooldown = false }) {
+function recordStamps(guest, { source, count = 1, jacuzziDelivered = false, bypassCooldown = false }) {
   const numberOfStamps = Number(count);
   if (!Number.isInteger(numberOfStamps) || numberOfStamps < 1) return { error: 'Selecciona una cantidad válida de sellos.' };
   const progress = Math.min(Math.max(Number(guest.stampProgress) || 0, 0), STAMP_LIMIT);
@@ -118,8 +118,6 @@ function recordStamps(guest, { source, count = 1, discountUsed = false, purchase
     return { error: `Este sello ya fue registrado recientemente. Podrá registrarse otro el ${date}.`, nextAllowedAt: new Date(next).toISOString() };
   }
   const previousReward = reward(progress);
-  const amount = Number(purchaseAmount);
-  const validPurchaseAmount = Number.isFinite(amount) && amount > 0 && amount <= 1000000000000 ? Math.round(amount) : null;
   const events = [];
   for (let index = 0; index < numberOfStamps; index += 1) {
     const stampNumber = progress + index + 1;
@@ -132,10 +130,6 @@ function recordStamps(guest, { source, count = 1, discountUsed = false, purchase
       stampNumber,
       discountAtArrival: previousReward,
       discountGranted: granted,
-      discountUsed: source !== 'qr' && index === 0 && previousReward > 0 ? Boolean(discountUsed) : null,
-      purchaseAmount: source !== 'qr' && index === 0 ? validPurchaseAmount : null,
-      discountAmount: source !== 'qr' && index === 0 && previousReward > 0 && discountUsed && validPurchaseAmount
-        ? Math.round(validPurchaseAmount * previousReward / 100) : null,
       jacuzziEarned,
       jacuzziDelivered: jacuzziEarned && Boolean(jacuzziDelivered),
       nextReward: granted,
@@ -647,32 +641,17 @@ async function api(req, res, url) {
       const now = Date.now();
       const periodStart = range === 'all' ? 0 : now - (days || 30) * 24 * 60 * 60 * 1000;
       const allEvents = [];
-      const allCheckouts = [];
       const eventsByGuest = new Map();
       for (const guest of db.guests) {
         const guestEvents = [];
         for (const item of guest.history || []) {
           if (!Number.isFinite(Date.parse(item.date))) continue;
-          if (item.type === 'checkout') {
-            if (item.deletedAt) continue;
-            allCheckouts.push({
-              guestId: guest.id,
-              time: Date.parse(item.date),
-              discountUsed: item.discountUsed === true,
-              discountAmount: Number(item.discountAmount) || 0,
-              purchaseAmount: Number(item.purchaseAmount) || 0,
-            });
-            continue;
-          }
           if (item.type !== 'stamp' || item.voidedAt || item.deletedAt) continue;
           const event = {
             guestId: guest.id,
             time: Date.parse(item.date),
             date: item.date,
             discountGranted: Number(item.discountGranted ?? item.nextReward ?? Math.min((Number(item.visitNumber) || 0) * 5, 25)),
-            discountUsed: item.discountUsed === true,
-            discountAmount: Number(item.discountAmount) || 0,
-            purchaseAmount: Number(item.purchaseAmount) || 0,
             jacuzziEarned: item.jacuzziEarned === true || (Number(item.discountGranted ?? item.nextReward) === 25 && Number(item.visitNumber) === STAMP_LIMIT),
             jacuzziDelivered: item.jacuzziDelivered === true,
           };
@@ -683,16 +662,12 @@ async function api(req, res, url) {
         eventsByGuest.set(guest.id, guestEvents);
       }
       const selectedEvents = allEvents.filter((item) => item.time >= periodStart);
-      const selectedCheckouts = allCheckouts.filter((item) => item.time >= periodStart);
       const periodGuests = new Set(selectedEvents.map((item) => item.guestId));
       const returningGuests = new Set([...periodGuests].filter((id) => (eventsByGuest.get(id) || []).length > 1));
       const repeatRate = periodGuests.size ? Math.round(returningGuests.size * 100 / periodGuests.size) : 0;
       const levels = [5, 10, 15, 20, 25];
       const stampsByLevel = Object.fromEntries(levels.map((level) => [level, selectedEvents.filter((item) => item.discountGranted === level).length]));
       const cardsByLevel = Object.fromEntries([0, ...levels].map((level) => [level, db.guests.filter((guest) => reward(guest.stampProgress) === level).length]));
-      const discountsUsed = [...selectedEvents.filter((item) => item.discountUsed), ...selectedCheckouts.filter((item) => item.discountUsed)];
-      const discountValue = Math.round(discountsUsed.reduce((sum, item) => sum + item.discountAmount, 0));
-      const trackedSales = Math.round(selectedEvents.reduce((sum, item) => sum + item.purchaseAmount, 0) + selectedCheckouts.reduce((sum, item) => sum + item.purchaseAmount, 0));
       let totalGapDays = 0;
       let gapCount = 0;
       for (const guestEvents of eventsByGuest.values()) {
@@ -743,9 +718,6 @@ async function api(req, res, url) {
         averageDaysBetweenVisits: gapCount ? Math.round(totalGapDays / gapCount) : null,
         stampsByLevel,
         cardsByLevel,
-        discountsUsed: discountsUsed.length,
-        discountValue,
-        trackedSales,
         jacuzziEarned: jacuzziEvents.length,
         jacuzziDelivered: jacuzziEvents.filter((item) => item.jacuzziDelivered).length,
         series: buckets,
@@ -787,23 +759,17 @@ async function api(req, res, url) {
     const checkoutMatch = pathname.match(/^\/api\/admin\/guests\/([a-f0-9-]+)\/checkouts$/i);
     if (method === 'POST' && checkoutMatch) {
       try {
-        const { discountRate = 0, discountUsed = false, purchaseAmount = null } = await readJson(req);
+        const { discountRate = 0 } = await readJson(req);
         const guest = db.guests.find((item) => item.id === checkoutMatch[1]);
         if (!guest) return send(res, 404, { error: 'No encontramos ese huésped.' });
         const rate = Number(discountRate);
         if (![0, 5, 10, 15, 20, 25].includes(rate) || rate > reward(guest.stampProgress)) {
           return send(res, 400, { error: 'El descuento disponible de esta tarjeta cambió. Actualiza la búsqueda e inténtalo de nuevo.' });
         }
-        if (discountUsed && rate === 0) return send(res, 400, { error: 'Esta tarjeta todavía no tiene un descuento para aplicar.' });
-        const amount = Number(purchaseAmount);
-        const validPurchaseAmount = Number.isFinite(amount) && amount > 0 && amount <= 1000000000000 ? Math.round(amount) : null;
         const date = new Date().toISOString();
         const event = {
           id: crypto.randomUUID(), type: 'checkout', source: 'reception', date,
           discountAtArrival: rate,
-          discountUsed: rate > 0 ? Boolean(discountUsed) : false,
-          purchaseAmount: validPurchaseAmount,
-          discountAmount: rate > 0 && discountUsed && validPurchaseAmount ? Math.round(validPurchaseAmount * rate / 100) : null,
         };
         guest.history = [...(guest.history || []), event];
         guest.updatedAt = date;
@@ -831,10 +797,10 @@ async function api(req, res, url) {
     const stampMatch = pathname.match(/^\/api\/admin\/guests\/([a-f0-9-]+)\/stamps\/manual$/i);
     if (method === 'POST' && stampMatch) {
       try {
-        const { discountUsed = false, count = 1, purchaseAmount = null, jacuzziDelivered = false } = await readJson(req);
+        const { count = 1, jacuzziDelivered = false } = await readJson(req);
         const guest = db.guests.find((item) => item.id === stampMatch[1]);
         if (!guest) return send(res, 404, { error: 'No encontramos ese huésped.' });
-        const result = recordStamps(guest, { source: 'reception', count, discountUsed, purchaseAmount, jacuzziDelivered, bypassCooldown: true });
+        const result = recordStamps(guest, { source: 'reception', count, jacuzziDelivered, bypassCooldown: true });
         if (result.error) return send(res, 429, result);
         return send(res, 201, { guest: safeGuest(guest), events: result.events });
       } catch {
@@ -883,7 +849,7 @@ async function api(req, res, url) {
   return null;
 }
 
-const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.jpg': 'image/jpeg', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json; charset=utf-8' };
+const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.jpg': 'image/jpeg', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.mp4': 'video/mp4', '.webmanifest': 'application/manifest+json; charset=utf-8' };
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -895,11 +861,50 @@ const server = http.createServer(async (req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'Método no permitido.');
     let pathname = decodeURIComponent(url.pathname);
     if (pathname === '/' || pathname === '/registro' || pathname === '/sello') pathname = '/index.html';
-    const allowed = new Set(['/index.html', '/logo-tonusco.jpg', '/favicon.ico', '/manifest.webmanifest', '/service-worker.js', '/icon-tonusco.svg', '/icon-tonusco-192.png', '/icon-tonusco-512.png']);
+    const allowed = new Set(['/index.html', '/logo-tonusco.jpg', '/favicon.ico', '/manifest.webmanifest', '/service-worker.js', '/icon-tonusco.svg', '/icon-tonusco-192.png', '/icon-tonusco-512.png', '/videos/guia-inicio-android.mp4', '/videos/guia-inicio-iphone.mp4']);
     if (!allowed.has(pathname)) return send(res, 404, 'Página no encontrada.');
     const file = path.join(ROOT, pathname.slice(1));
     if (!fs.existsSync(file)) return send(res, 404, 'Página no encontrada.');
-    res.writeHead(200, { 'Content-Type': mime[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'Content-Security-Policy': "default-src 'self'; img-src 'self' data: https://api.qrserver.com; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" });
+    const extension = path.extname(file);
+    const stat = fs.statSync(file);
+    const headers = { 'Content-Type': mime[extension] || 'application/octet-stream', 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'Content-Security-Policy': "default-src 'self'; img-src 'self' data: https://api.qrserver.com; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" };
+    if (extension === '.mp4') {
+      headers['Accept-Ranges'] = 'bytes';
+      const range = req.headers.range;
+      if (range) {
+        const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+        if (!match) {
+          res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+          return res.end();
+        }
+        let start;
+        let end;
+        if (match[1] === '') {
+          const suffixLength = Number(match[2]);
+          if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) {
+            res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+            return res.end();
+          }
+          start = Math.max(stat.size - suffixLength, 0);
+          end = stat.size - 1;
+        } else {
+          start = Number(match[1]);
+          end = match[2] === '' ? stat.size - 1 : Number(match[2]);
+        }
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || start >= stat.size) {
+          res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+          return res.end();
+        }
+        end = Math.min(end, stat.size - 1);
+        headers['Content-Range'] = `bytes ${start}-${end}/${stat.size}`;
+        headers['Content-Length'] = String(end - start + 1);
+        res.writeHead(206, headers);
+        if (req.method === 'HEAD') return res.end();
+        return fs.createReadStream(file, { start, end }).pipe(res);
+      }
+    }
+    headers['Content-Length'] = String(stat.size);
+    res.writeHead(200, headers);
     if (req.method === 'HEAD') return res.end();
     fs.createReadStream(file).pipe(res);
   } catch (error) {

@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_NAME = 'club-tonusco-shell-v1';
+const CACHE_NAME = 'club-tonusco-shell-v2';
 const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icon-tonusco.svg', '/icon-tonusco-192.png', '/icon-tonusco-512.png', '/logo-tonusco.jpg'];
 
 self.addEventListener('install', (event) => {
@@ -16,7 +16,7 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   const url = new URL(request.url);
-  if (request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
+  if (request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/') || request.headers.has('range') || /\.mp4$/i.test(url.pathname)) return;
   event.respondWith(fetch(request).then((response) => {
     if (response.ok) caches.open(CACHE_NAME).then((cache) => cache.put(request, response.clone()));
     return response;
