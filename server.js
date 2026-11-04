@@ -624,6 +624,26 @@ async function api(req, res, url) {
       }
     }
 
+    const deleteGuestMatch = pathname.match(/^\/api\/admin\/guests\/([a-f0-9-]+)$/i);
+    if (method === 'DELETE' && deleteGuestMatch) {
+      try {
+        const { confirmDelete } = await readJson(req);
+        if (confirmDelete !== true) return send(res, 400, { error: 'Confirma que quieres eliminar este huésped y todo su historial.' });
+        const guestIndex = db.guests.findIndex((item) => item.id === deleteGuestMatch[1]);
+        if (guestIndex < 0) return send(res, 404, { error: 'No encontramos ese huésped.' });
+        const [guest] = db.guests.splice(guestIndex, 1);
+        try {
+          writeDb();
+        } catch (error) {
+          db.guests.splice(guestIndex, 0, guest);
+          throw error;
+        }
+        return send(res, 200, { ok: true, guest: { id: guest.id, cardNo: guest.cardNo, name: guest.name }, deletedHistoryCount: (guest.history || []).length });
+      } catch {
+        return send(res, 500, { error: 'No pudimos eliminar el huésped. Inténtalo de nuevo.' });
+      }
+    }
+
     if (method === 'GET' && pathname === '/api/admin/guests') {
       const q = String(url.searchParams.get('q') || '').trim().toLowerCase();
       const phoneQuery = normalizePhone(q);
