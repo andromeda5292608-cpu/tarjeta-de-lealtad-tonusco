@@ -482,38 +482,8 @@ async function api(req, res, url) {
     if (!originAllowed(req)) return send(res, 403, { error: 'Solicitud no permitida.' });
     if (!allowPublicRequest(req, 'card-access', 120)) return send(res, 429, { error: 'Inténtalo de nuevo más tarde.' });
     const guest = cardAccessGuest(req);
-    if (!guest) return send(res, 401, { error: 'No encontramos el acceso guardado de esta tarjeta. Vuelve a inscribirte con el QR de registro.' });
+    if (!guest) return send(res, 401, { error: 'No encontramos el acceso guardado de esta tarjeta. Vuelve a consultarla con tu número de celular.' });
     return send(res, 200, { card: publicGuest(guest) });
-  }
-
-  if (method === 'POST' && pathname === '/api/enroll') {
-    if (!originAllowed(req)) return send(res, 403, { error: 'Solicitud no permitida.' });
-    if (!allowPublicRequest(req, 'enroll', 50)) return send(res, 429, { error: 'Se alcanzó el límite de registros desde esta red. Inténtalo más tarde.' });
-    try {
-      const { name: rawName, phone: rawPhone, consent } = await readJson(req);
-      const name = String(rawName || '').trim().replace(/\s+/g, ' ');
-      const phone = normalizePhone(rawPhone);
-      if (name.length < 2 || name.length > 100) return send(res, 400, { error: 'Escribe un nombre válido.' });
-      if (phone.length < 7 || phone.length > 15) return send(res, 400, { error: 'Escribe un número de celular válido.' });
-      if (consent !== true) return send(res, 400, { error: 'Debes aceptar el uso de tus datos para crear la tarjeta.' });
-      const existing = db.guests.find((item) => item.phone === phone);
-      if (existing) {
-        const token = issueCardAccess(existing);
-        writeDb();
-        return send(res, 200, { card: publicGuest(existing), alreadyRegistered: true }, { 'Set-Cookie': cardAccessCookie(token, req) });
-      }
-      const guest = {
-        id: crypto.randomUUID(), cardNo: createCardNo(), name, phone, visits: 0, stampProgress: 0,
-        createdAt: new Date().toISOString(), consentAt: new Date().toISOString(),
-        source: 'self-service', history: [],
-      };
-      const token = issueCardAccess(guest);
-      db.guests.push(guest);
-      writeDb();
-      return send(res, 201, { card: publicGuest(guest), alreadyRegistered: false }, { 'Set-Cookie': cardAccessCookie(token, req) });
-    } catch {
-      return send(res, 400, { error: 'No pudimos crear la tarjeta. Verifica los datos e inténtalo de nuevo.' });
-    }
   }
 
   if (method === 'POST' && pathname === '/api/stamp') {
@@ -524,7 +494,7 @@ async function api(req, res, url) {
       const phone = normalizePhone(rawPhone);
       if (phone.length < 7 || phone.length > 15) return send(res, 400, { error: 'Escribe un número de celular válido.' });
       const guest = db.guests.find((item) => item.phone === phone);
-      if (!guest) return send(res, 404, { error: 'No encontramos una tarjeta con ese celular. Inscríbete primero con el QR de registro.' });
+      if (!guest) return send(res, 404, { error: 'No encontramos una tarjeta con ese celular. Pide en recepción que creen tu tarjeta.' });
       const result = recordStamps(guest, { source: 'qr' });
       if (result.error) return send(res, 429, { error: result.nextAllowedAt ? 'Este sello ya fue registrado recientemente. Consulta con recepción si necesitas ayuda.' : result.error });
       return send(res, 201, { card: publicGuest(guest), events: result.events });

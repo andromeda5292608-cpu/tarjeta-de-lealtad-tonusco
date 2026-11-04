@@ -14,7 +14,7 @@ La app no necesita instalar paquetes npm. En local guarda los datos en `data/ton
 
 La tarjeta tiene nueve sellos, uno por visita: **5%, 5%, 10%, 10%, 15%, 15%, 20%, 20% y 25%**. El porcentaje que se gana se usa en la siguiente visita. El 25% final incluye una hora de jacuzzi para el titular y sus acompañantes.
 
-Los huéspedes se inscriben en `/registro`, consultan su tarjeta con el celular y solicitan un sello por `/sello` al finalizar la visita. El QR público permite un sello cada 48 horas. Recepción puede buscar clientes e historial, registrar o quitar varios sellos sin esperar ese intervalo, y consultar las estadísticas de lealtad.
+Recepción crea la tarjeta de cada huésped desde el panel de administración; el huésped consulta su tarjeta con el celular y solicita un sello por `/sello` al finalizar la visita. El QR público permite un sello cada 48 horas. Recepción puede buscar clientes e historial, registrar o quitar varios sellos sin esperar ese intervalo, y consultar las estadísticas de lealtad.
 
 ## Datos y despliegue
 
@@ -26,4 +26,4 @@ Los huéspedes se inscriben en `/registro`, consultan su tarjeta con el celular 
 
 ## Apple Wallet y Google Wallet
 
-La interfaz y generación de pases están implementadas. La sección aparece después del registro o de consultar la tarjeta. Los botones permanecen desactivados hasta configurar las cuentas y claves oficiales de cada proveedor. Consulta [WALLET_SETUP.md](WALLET_SETUP.md); no guardes los secretos en GitHub ni en archivos de contexto.
+La interfaz y generación de pases están implementadas. La sección aparece después de consultar la tarjeta. Los botones permanecen desactivados hasta configurar las cuentas y claves oficiales de cada proveedor. Consulta [WALLET_SETUP.md](WALLET_SETUP.md); no guardes los secretos en GitHub ni en archivos de contexto.

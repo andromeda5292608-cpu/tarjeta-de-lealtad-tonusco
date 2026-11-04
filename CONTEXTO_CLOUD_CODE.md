@@ -37,10 +37,10 @@ Inicio local en Windows: copia `.env.example` a `.env`, asigna una clave segura 
 - Son **9 sellos, uno por visita**, en este orden: `5%, 5%, 10%, 10%, 15%, 15%, 20%, 20%, 25%`.
 - Fórmula actual: descuento `ceil(sellos / 2) × 5`, con tope de 25%. Los primeros sellos se conceden al final de la visita y habilitan el descuento para la siguiente.
 - Al completar el sello 9 (25%), el titular y sus acompañantes reciben una hora de jacuzzi.
-- QR para huéspedes: `/registro` crea la tarjeta una sola vez; `/sello` registra un sello cuando el cliente confirma su celular. El QR aplica un mínimo interno de 48 horas desde el sello anterior; no se muestra esa restricción en la tarjeta del cliente.
+- Las tarjetas se crean solo desde el panel de administración; ya no existe inscripción pública (`/registro` solo muestra la consulta por celular). `/sello` registra un sello cuando el cliente confirma su celular. El QR aplica un mínimo interno de 48 horas desde el sello anterior; no se muestra esa restricción en la tarjeta del cliente.
 - Administración puede agregar varios sellos o quitar varios de una vez, sin esperar 48 horas. La operación administrativa registra los cambios en el historial.
 - Al buscar por celular, el cliente ve la tarjeta y el historial. Administración dispone de búsqueda de huéspedes, historial y dashboard de estadísticas.
-- Después de registrarse o consultar la tarjeta, el huésped puede agregar la PWA a inicio y desplegar la sección plegable **Agregar tarjeta a Wallet**. El enlace pequeño de regreso a la página principal se eliminó.
+- Después de consultar la tarjeta, el huésped puede agregar la PWA a inicio y desplegar la sección plegable **Agregar tarjeta a Wallet**. El enlace pequeño de regreso a la página principal se eliminó.
 
 ## Producción en Render
 
