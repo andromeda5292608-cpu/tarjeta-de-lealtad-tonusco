@@ -396,7 +396,20 @@ function originAllowed(req) {
   const forwardedHost = req.headers['x-forwarded-host'];
   const protocol = forwardedProto ? String(forwardedProto).split(',')[0].trim() : (req.socket.encrypted ? 'https' : 'http');
   const host = forwardedHost ? String(forwardedHost).split(',')[0].trim() : req.headers.host;
-  return origin === `${protocol}://${host}`;
+  if (origin === `${protocol}://${host}`) return true;
+  // Solo en el preview de Base44: el proxy entrega el Host del sandbox mientras el
+  // navegador envía el origen público (https://3000-<BASE44_PUBLIC_HOST_SUFFIX>).
+  if (process.env.BASE44_PREVIEW_MODE === '1') {
+    const suffix = process.env.BASE44_PUBLIC_HOST_SUFFIX;
+    if (suffix) {
+      try {
+        // El host público del preview es <puerto>-<sufijo>, p. ej. 3000-<sufijo>.
+        const originHost = new URL(origin).hostname;
+        if (originHost === `${process.env.PORT || '3000'}-${suffix}`) return true;
+      } catch { /* origen con formato inválido */ }
+    }
+  }
+  return false;
 }
 
 function requireAdmin(req, res) {
@@ -487,8 +500,33 @@ async function api(req, res, url) {
   }
 
   if (method === 'POST' && pathname === '/api/enroll') {
-    // Las tarjetas se crean únicamente desde recepción (/api/admin/guests).
-    return send(res, 403, { error: 'Las tarjetas se crean en recepción de la hostería.' });
+    if (!originAllowed(req)) return send(res, 403, { error: 'Solicitud no permitida.' });
+    if (!allowPublicRequest(req, 'enroll', 50)) return send(res, 429, { error: 'Se alcanzó el límite de registros desde esta red. Inténtalo más tarde.' });
+    try {
+      const { name: rawName, phone: rawPhone, consent } = await readJson(req);
+      const name = String(rawName || '').trim().replace(/\s+/g, ' ');
+      const phone = normalizePhone(rawPhone);
+      if (name.length < 2 || name.length > 100) return send(res, 400, { error: 'Escribe un nombre válido.' });
+      if (phone.length < 7 || phone.length > 15) return send(res, 400, { error: 'Escribe un número de celular válido.' });
+      if (consent !== true) return send(res, 400, { error: 'Debes aceptar el uso de tus datos para crear la tarjeta.' });
+      const existing = db.guests.find((item) => item.phone === phone);
+      if (existing) {
+        const token = issueCardAccess(existing);
+        writeDb();
+        return send(res, 200, { card: publicGuest(existing), alreadyRegistered: true }, { 'Set-Cookie': cardAccessCookie(token, req) });
+      }
+      const guest = {
+        id: crypto.randomUUID(), cardNo: createCardNo(), name, phone, visits: 0, stampProgress: 0,
+        createdAt: new Date().toISOString(), consentAt: new Date().toISOString(),
+        source: 'self-service', history: [],
+      };
+      const token = issueCardAccess(guest);
+      db.guests.push(guest);
+      writeDb();
+      return send(res, 201, { card: publicGuest(guest), alreadyRegistered: false }, { 'Set-Cookie': cardAccessCookie(token, req) });
+    } catch {
+      return send(res, 400, { error: 'No pudimos crear la tarjeta. Verifica los datos e inténtalo de nuevo.' });
+    }
   }
 
   if (method === 'POST' && pathname === '/api/stamp') {
