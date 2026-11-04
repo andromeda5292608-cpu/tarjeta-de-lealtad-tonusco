@@ -487,33 +487,8 @@ async function api(req, res, url) {
   }
 
   if (method === 'POST' && pathname === '/api/enroll') {
-    if (!originAllowed(req)) return send(res, 403, { error: 'Solicitud no permitida.' });
-    if (!allowPublicRequest(req, 'enroll', 50)) return send(res, 429, { error: 'Se alcanzó el límite de registros desde esta red. Inténtalo más tarde.' });
-    try {
-      const { name: rawName, phone: rawPhone, consent } = await readJson(req);
-      const name = String(rawName || '').trim().replace(/\s+/g, ' ');
-      const phone = normalizePhone(rawPhone);
-      if (name.length < 2 || name.length > 100) return send(res, 400, { error: 'Escribe un nombre válido.' });
-      if (phone.length < 7 || phone.length > 15) return send(res, 400, { error: 'Escribe un número de celular válido.' });
-      if (consent !== true) return send(res, 400, { error: 'Debes aceptar el uso de tus datos para crear la tarjeta.' });
-      const existing = db.guests.find((item) => item.phone === phone);
-      if (existing) {
-        const token = issueCardAccess(existing);
-        writeDb();
-        return send(res, 200, { card: publicGuest(existing), alreadyRegistered: true }, { 'Set-Cookie': cardAccessCookie(token, req) });
-      }
-      const guest = {
-        id: crypto.randomUUID(), cardNo: createCardNo(), name, phone, visits: 0, stampProgress: 0,
-        createdAt: new Date().toISOString(), consentAt: new Date().toISOString(),
-        source: 'self-service', history: [],
-      };
-      const token = issueCardAccess(guest);
-      db.guests.push(guest);
-      writeDb();
-      return send(res, 201, { card: publicGuest(guest), alreadyRegistered: false }, { 'Set-Cookie': cardAccessCookie(token, req) });
-    } catch {
-      return send(res, 400, { error: 'No pudimos crear la tarjeta. Verifica los datos e inténtalo de nuevo.' });
-    }
+    // Las tarjetas se crean únicamente desde recepción (/api/admin/guests).
+    return send(res, 403, { error: 'Las tarjetas se crean en recepción de la hostería.' });
   }
 
   if (method === 'POST' && pathname === '/api/stamp') {
